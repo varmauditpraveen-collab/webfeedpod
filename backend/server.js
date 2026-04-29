@@ -3,8 +3,6 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const { connectDB } = require('./services/db');
-// Background jobs are user-scoped in the multi-user version, so we run them
-// via explicit user actions (Build / Cleanup) instead of server boot.
 const session = require('express-session');
 const passport = require('passport');
 const GoogleStrategy = require('passport-google-oauth20').Strategy;
@@ -14,7 +12,11 @@ const { upsertUserFromGoogle, getUserById } = require('./services/supabase');
 const { requireAuth } = require('./middleware/auth');
 
 const app = express();
-app.use(cors());
+
+app.use(cors({
+  origin: process.env.CLIENT_ORIGIN || true,
+  credentials: true,
+}));
 app.use(express.json({ limit: '2mb' }));
 
 // Sessions (stored in Postgres via connect-pg-simple)
@@ -22,12 +24,14 @@ const pgPool = new Pool({
   connectionString: process.env.SUPABASE_DB_URL,
 });
 
+// Required for Railway's reverse proxy to pass correct protocol for secure cookies
 app.set('trust proxy', 1);
+
 app.use(
   session({
     store: new PgSession({
       pool: pgPool,
-      // connect-pg-simple creates the table automatically.
+      createTableIfMissing: true, // auto-creates session table if not present
     }),
     secret: process.env.SESSION_SECRET || 'dev-session-secret',
     resave: false,
@@ -35,7 +39,9 @@ app.use(
     cookie: {
       httpOnly: true,
       sameSite: 'lax',
+      // secure requires NODE_ENV=production to be set in Railway env vars
       secure: process.env.NODE_ENV === 'production',
+      maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
     },
   })
 );
@@ -56,6 +62,7 @@ passport.use(
     async (accessToken, refreshToken, profile, done) => {
       try {
         const user = await upsertUserFromGoogle(profile);
+        if (!user) return done(new Error('upsertUserFromGoogle returned null — check Supabase RLS or service role key'));
         return done(null, user);
       } catch (e) {
         return done(e);
@@ -68,6 +75,7 @@ passport.serializeUser((user, done) => done(null, user.id));
 passport.deserializeUser(async (id, done) => {
   try {
     const u = await getUserById(id);
+    if (!u) return done(null, false); // user deleted — treat as logged out
     return done(null, u);
   } catch (e) {
     return done(e);
@@ -95,7 +103,7 @@ app.use('/api/tts', require('./routes/tts'));
 app.use('/api/cleanup', require('./routes/cleanup'));
 app.use('/api/analytics', require('./routes/analytics'));
 
-// Frontend runtime config (allows GA to be configured later via env vars)
+// Frontend runtime config
 app.get('/config.js', (req, res) => {
   res.type('application/javascript');
   const config = {
