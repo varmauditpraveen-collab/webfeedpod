@@ -6,5 +6,3 @@ buildCommand = "npm install"
 startCommand = "node server.js"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 5
-healthcheckPath = "/api/tts/health"
-healthcheckTimeout = 30
