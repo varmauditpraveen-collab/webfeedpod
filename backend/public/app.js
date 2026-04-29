@@ -220,7 +220,6 @@ function switchTab(tab) {
   if (tab === 'feeds') loadFeeds();
   if (tab === 'saved') loadSaved();
   if (tab === 'settings') loadSettings();
-  if (tab === 'stats') loadStats();
   trackEvent('tab_switched', { tab }, { backend: false });
 }
 
@@ -797,54 +796,6 @@ function playSavedStory(it) {
   };
 
   playCurrent();
-}
-
-/* ---------- Stats ---------- */
-async function loadStats() {
-  const [{ stats: topEvents } = {}, eventsRes = {}] = await Promise.all([
-    api.get('/api/analytics/stats?days=7').catch(() => ({})),
-    api.get('/api/analytics/events?limit=25').catch(() => ({ events: [] })),
-  ]);
-
-  const statsCards = $('#stats-cards');
-  const ul = $('#event-list');
-  if (!statsCards || !ul) return;
-  trackEvent('stats_viewed', {});
-
-  const stats = Array.isArray(topEvents) ? topEvents : [];
-  const totalEvents = stats.reduce((sum, e) => sum + (e.count || 0), 0);
-
-  statsCards.innerHTML = '';
-  const cards = [
-    { label: 'Total events', value: String(totalEvents) },
-    ...stats.slice(0, 3).map((e) => ({ label: e.eventName, value: String(e.count || 0) })),
-  ];
-  for (const c of cards) {
-    const div = document.createElement('div');
-    div.className = 'stat-card';
-    div.innerHTML = `<div class="label">${escapeHtml(c.label)}</div><div class="value">${escapeHtml(c.value)}</div>`;
-    statsCards.appendChild(div);
-  }
-
-  const events = Array.isArray(eventsRes.events) ? eventsRes.events : [];
-  ul.innerHTML = '';
-  if (!events.length) {
-    ul.innerHTML = `<li class="empty">No events yet.</li>`;
-    return;
-  }
-
-  for (const e of events) {
-    const li = document.createElement('li');
-    li.className = 'event-item';
-    const when = e.created_at ? new Date(e.created_at).toLocaleString() : '';
-    const props = e.event_properties ? JSON.stringify(e.event_properties) : '';
-    li.innerHTML = `
-      <div class="when">${escapeHtml(when)}</div>
-      <div class="name">${escapeHtml(e.event_name || '')}</div>
-      ${props ? `<div class="subtle">${escapeHtml(props)}</div>` : ''}
-    `;
-    ul.appendChild(li);
-  }
 }
 
 /* ---------- Settings ---------- */
