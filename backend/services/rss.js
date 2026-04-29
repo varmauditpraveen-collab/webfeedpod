@@ -298,6 +298,13 @@ async function fetchArticleText(url) {
     const domain = domainOf(url);
     const container = await findBestContainer(root, domain);
 
+    // Extract og:image / twitter:image for feeds that don't embed images in RSS
+    const ogImage =
+      root.querySelector('meta[property="og:image"]')?.getAttribute('content') ||
+      root.querySelector('meta[name="twitter:image"]')?.getAttribute('content') ||
+      root.querySelector('meta[name="twitter:image:src"]')?.getAttribute('content') ||
+      '';
+
     const elements = container.querySelectorAll('h1, h2, h3, h4, h5, h6, p');
     const sections = chunkIntoSections(Array.from(elements));
 
@@ -308,17 +315,17 @@ async function fetchArticleText(url) {
       .slice(0, 8000);
 
     if (paywallInHtml && fullText.length < 200) {
-      return { text: '', sections: [], paywall: true, pubDate };
+      return { text: '', sections: [], paywall: true, pubDate, ogImage };
     }
 
     if (fullText.length < 150) {
-      return { text: '', sections: [], paywall: true, pubDate };
+      return { text: '', sections: [], paywall: true, pubDate, ogImage };
     }
 
-    return { text: fullText, sections, paywall: false, pubDate };
+    return { text: fullText, sections, paywall: false, pubDate, ogImage };
   } catch (e) {
     console.warn(`[rss] fetchArticleText failed for ${url}: ${e.message}`);
-    return { text: '', sections: [], paywall: false, pubDate: null };
+    return { text: '', sections: [], paywall: false, pubDate: null, ogImage: '' };
   }
 }
 
@@ -352,8 +359,8 @@ async function fetchAndParseFeed(feedUrl) {
       return {
         title: pickFirst(e.title) || '(untitled)',
         link,
-        description: stripHtml(description), // Removed the .slice(0, 150)
-        content: stripHtml(content),         // Explicitly store full content field
+        description: stripHtml(description),
+        content: stripHtml(content),
         pubDate: pub,
         imageUrl: extractImage(e),
         youtubeId: extractYouTubeId(e),
