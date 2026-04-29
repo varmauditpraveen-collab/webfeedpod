@@ -8,28 +8,23 @@ const gemini = require('./gemini');
 const tts = require('./tts');
 const { todayDateStr } = require('./db');
 
-// SSE emitter registry — keyed by `${userId}:${podcastDate}`
+// SSE emitter registry — keyed by date
 const sseClients = new Map();
 
-// Abort controllers per user
-const currentBuildAborts = new Map();
+// Abort controller for the currently-running build (null when idle)
+let currentBuildAbort = null;
 
-function sseKey(userId, date) {
-  return `${userId}:${date}`;
+function registerSSEClient(date, res) {
+  if (!sseClients.has(date)) sseClients.set(date, new Set());
+  sseClients.get(date).add(res);
 }
 
-function registerSSEClient(userId, date, res) {
-  const key = sseKey(userId, date);
-  if (!sseClients.has(key)) sseClients.set(key, new Set());
-  sseClients.get(key).add(res);
+function unregisterSSEClient(date, res) {
+  sseClients.get(date)?.delete(res);
 }
 
-function unregisterSSEClient(userId, date, res) {
-  sseClients.get(sseKey(userId, date))?.delete(res);
-}
-
-function emitSSE(userId, date, event, data) {
-  const clients = sseClients.get(sseKey(userId, date));
+function emitSSE(date, event, data) {
+  const clients = sseClients.get(date);
   if (!clients || clients.size === 0) return;
   const payload = `data: ${JSON.stringify({ event, data })}\n\n`;
   for (const res of clients) {
@@ -38,22 +33,20 @@ function emitSSE(userId, date, event, data) {
 }
 
 /** Abort any in-progress build. Returns true if a build was running. */
-function abortCurrentBuild(userId) {
-  const abort = currentBuildAborts.get(userId);
-  if (!abort) return false;
-  abort.abort();
-  currentBuildAborts.delete(userId);
+function abortCurrentBuild() {
+  if (!currentBuildAbort) return false;
+  currentBuildAbort.abort();
+  currentBuildAbort = null;
   return true;
 }
 
 /** Whether a build is currently running */
-function isBuildRunning(userId) {
-  return currentBuildAborts.has(userId);
+function isBuildRunning() {
+  return currentBuildAbort !== null;
 }
 
-async function fetchAllFeeds(userId) {
-  if (!userId) throw new Error('fetchAllFeeds requires userId');
-  const feeds = await Feed.find({ userId });
+async function fetchAllFeeds() {
+  const feeds = await Feed.find({});
   const today = todayDateStr();
   const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
   let totalNew = 0;
@@ -72,10 +65,9 @@ async function fetchAllFeeds(userId) {
         if (!safeLink) continue;
         const pubDate = it.pubDate ? new Date(it.pubDate) : null;
         if (pubDate && pubDate < cutoff) continue;
-        const exists = await Item.findOne({ userId, link: safeLink }).lean();
+        const exists = await Item.findOne({ link: safeLink }).lean();
         if (exists) continue;
         await Item.create({
-          userId,
           ...it,
           link: safeLink,
           feedId: f._id,
@@ -92,35 +84,32 @@ async function fetchAllFeeds(userId) {
   return { totalNew, today };
 }
 
-async function getVoice(userId) {
-  const s = await Settings.findOne({ userId, key: 'voice' }).lean();
+async function getVoice() {
+  const s = await Settings.findOne({ key: 'voice' }).lean();
   return s?.value || 'af_heart';
 }
 
-async function setVoice(userId, voice) {
+async function setVoice(voice) {
   await Settings.findOneAndUpdate(
-    { userId, key: 'voice' },
-    { userId, key: 'voice', value: voice },
+    { key: 'voice' },
+    { key: 'voice', value: voice },
     { upsert: true, new: true }
   );
   return voice;
 }
 
 async function buildDailyPodcast(opts = {}) {
-  const userId = opts.userId;
-  if (!userId) throw new Error('buildDailyPodcast requires userId');
-
   const date = opts.date || todayDateStr();
-  const voice = opts.voice || (await getVoice(userId));
+  const voice = opts.voice || (await getVoice());
 
   // Register a new abort controller for this build
   const abort = new AbortController();
-  currentBuildAborts.set(userId, abort);
+  currentBuildAbort = abort;
   const signal = abort.signal;
 
   const podcast = await Podcast.findOneAndUpdate(
-    { userId, podcastDate: date },
-    { userId, podcastDate: date, voice, status: 'building', statusMessage: 'Gathering items…', timeline: [] },
+    { podcastDate: date },
+    { podcastDate: date, voice, status: 'building', statusMessage: 'Gathering items…', timeline: [] },
     { upsert: true, new: true }
   );
 
@@ -136,7 +125,6 @@ async function buildDailyPodcast(opts = {}) {
 
     const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const allItems = await Item.find({
-      userId,
       podcastDate: date,
       pubDate: { $gte: cutoff },
     }).sort({ pubDate: -1 }).lean();
@@ -148,7 +136,7 @@ async function buildDailyPodcast(opts = {}) {
       podcast.statusMessage = 'No items for today.';
       podcast.builtAt = new Date();
       await podcast.save();
-      emitSSE(userId, date, 'done', { totalDurationSeconds: 0 });
+      emitSSE(date, 'done', { totalDurationSeconds: 0 });
       return podcast;
     }
 
@@ -191,7 +179,7 @@ async function buildDailyPodcast(opts = {}) {
         podcast.timeline = [...timeline];
         podcast.totalDurationSeconds = cursor;
         await podcast.save();
-        emitSSE(userId, date, 'segment', entry);
+        emitSSE(date, 'segment', entry);
       } catch (e) {
         if (e.code === 'ABORTED') throw e;
         console.warn(`[tts] feed intro failed (${feedTitle}): ${e.message}`);
@@ -210,7 +198,13 @@ async function buildDailyPodcast(opts = {}) {
         checkAbort();
 
         console.log(`[scrape] fetching: ${itemDoc.link}`);
-        const { text: articleText, sections, paywall, pubDate: scrapedDate } = await fetchArticleText(itemDoc.link);
+        const { text: articleText, sections, paywall, pubDate: scrapedDate, ogImage } = await fetchArticleText(itemDoc.link);
+
+        // If the RSS feed had no image, save the og:image scraped from the article page
+        if (ogImage && !itemDoc.imageUrl) {
+          await Item.findByIdAndUpdate(itemDoc._id, { imageUrl: ogImage });
+          itemDoc.imageUrl = ogImage;
+        }
 
         checkAbort();
 
@@ -259,8 +253,6 @@ async function buildDailyPodcast(opts = {}) {
         // storyId groups all chunks (intro + article) of one story together
         const storyId = String(itemDoc._id);
         const nonEmptyChunks = ttsChunks.filter(c => c.trim());
-        let storyIntroAudioPath = null;
-        let storyIntroDurationSeconds = 0;
 
         try {
           const storyIntroTts = await tts.synthesize(
@@ -284,17 +276,12 @@ async function buildDailyPodcast(opts = {}) {
             link: itemDoc.link,
             youtubeId: itemDoc.youtubeId,
           };
-
-          // Persist so the Saved section can rebuild the full stitched story.
-          storyIntroAudioPath = storyIntroTts.audioPath;
-          storyIntroDurationSeconds = storyIntroTts.durationSeconds;
-
           timeline.push(entry);
           cursor += storyIntroTts.durationSeconds;
           podcast.timeline = [...timeline];
           podcast.totalDurationSeconds = cursor;
           await podcast.save();
-          emitSSE(userId, date, 'segment', entry);
+          emitSSE(date, 'segment', entry);
         } catch (e) {
           if (e.code === 'ABORTED') throw e;
           console.warn(`[tts] story intro failed "${itemDoc.title}": ${e.message}`);
@@ -307,8 +294,6 @@ async function buildDailyPodcast(opts = {}) {
             let totalArticleDuration = 0;
             let firstAudioPath = null;
             let emittedCount = 0;
-            const articleAudioPaths = [];
-            const articleAudioDurationsSeconds = [];
 
             for (let ci = 0; ci < ttsChunks.length; ci++) {
               checkAbort();
@@ -322,8 +307,6 @@ async function buildDailyPodcast(opts = {}) {
               checkAbort();
               if (emittedCount === 0) firstAudioPath = articleTts.audioPath;
               totalArticleDuration += articleTts.durationSeconds;
-              articleAudioPaths.push(articleTts.audioPath);
-              articleAudioDurationsSeconds.push(articleTts.durationSeconds);
               emittedCount++;
 
               const chunkEntry = {
@@ -346,15 +329,10 @@ async function buildDailyPodcast(opts = {}) {
               podcast.timeline = [...timeline];
               podcast.totalDurationSeconds = cursor;
               await podcast.save();
-              emitSSE(userId, date, 'segment', chunkEntry);
+              emitSSE(date, 'segment', chunkEntry);
             }
 
-            // Store all chunk audio paths so Saved can reconstruct the full story.
             itemDoc.ttsAudioPath = firstAudioPath;
-            itemDoc.ttsAudioPaths = articleAudioPaths;
-            itemDoc.ttsAudioDurationsSeconds = articleAudioDurationsSeconds;
-            itemDoc.ttsStoryIntroAudioPath = storyIntroAudioPath || '';
-            itemDoc.ttsStoryIntroDurationSeconds = storyIntroDurationSeconds || 0;
             itemDoc.ttsDurationSeconds = totalArticleDuration;
             itemDoc.ttsVoice = voice;
             itemDoc.ttsAttempts = 0;
@@ -364,13 +342,6 @@ async function buildDailyPodcast(opts = {}) {
           } catch (e) {
             if (e.code === 'ABORTED') throw e;
             const msg = e.message || String(e);
-            // Persist whatever we managed to synthesize so Saved can still play.
-            itemDoc.ttsStoryIntroAudioPath = storyIntroAudioPath || '';
-            itemDoc.ttsStoryIntroDurationSeconds = storyIntroDurationSeconds || 0;
-            itemDoc.ttsAudioPath = firstAudioPath;
-            itemDoc.ttsAudioPaths = articleAudioPaths || [];
-            itemDoc.ttsAudioDurationsSeconds = articleAudioDurationsSeconds || [];
-            itemDoc.ttsDurationSeconds = totalArticleDuration || 0;
             itemDoc.ttsLastError = msg;
             itemDoc.ttsLastAttemptAt = new Date();
             const isInfraError = /cannot reach KOKORO_URL|Invalid URL|kokoro timeout|ECONNREFUSED|ENOTFOUND|ETIMEDOUT/.test(msg);
@@ -390,7 +361,7 @@ async function buildDailyPodcast(opts = {}) {
     podcast.statusMessage = '';
     podcast.builtAt = new Date();
     await podcast.save();
-    emitSSE(userId, date, 'done', { totalDurationSeconds: cursor });
+    emitSSE(date, 'done', { totalDurationSeconds: cursor });
     return podcast;
   } catch (e) {
     if (e.code === 'ABORTED') {
@@ -399,7 +370,7 @@ async function buildDailyPodcast(opts = {}) {
         podcast.status = 'error';
         podcast.statusMessage = 'Cancelled by cleanup.';
         await podcast.save();
-        emitSSE(userId, date, 'error', { message: 'Cancelled by cleanup.' });
+        emitSSE(date, 'error', { message: 'Cancelled by cleanup.' });
       } catch {}
       return;
     }
@@ -407,12 +378,12 @@ async function buildDailyPodcast(opts = {}) {
     podcast.status = 'error';
     podcast.statusMessage = e.message;
     await podcast.save();
-    emitSSE(userId, date, 'error', { message: e.message });
+    emitSSE(date, 'error', { message: e.message });
     throw e;
   } finally {
     // Clear the controller only if it's still ours
-    if (currentBuildAborts.get(userId) === abort) {
-      currentBuildAborts.delete(userId);
+    if (currentBuildAbort === abort) {
+      currentBuildAbort = null;
     }
   }
 }
