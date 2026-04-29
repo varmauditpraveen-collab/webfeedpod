@@ -47,14 +47,13 @@ function isBuildRunning() {
 
 // FIX: Added opts so we can pass userId when fetching feeds
 async function fetchAllFeeds(opts = {}) {
-  const userId = opts.userId;
-  // Scope feeds to the user if a userId is provided
-  const query = userId ? { userId } : {}; 
+  const query = opts.userId ? { userId: opts.userId } : {}; 
   const feeds = await Feed.find(query);
   
   const today = todayDateStr();
   const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
   let totalNew = 0;
+
   for (const f of feeds) {
     try {
       const { title, items } = await fetchAndParseFeed(f.feedUrl);
@@ -63,6 +62,14 @@ async function fetchAllFeeds(opts = {}) {
         try { f.iconUrl = await discoverFavicon(f.websiteUrl); } catch {}
       }
       f.lastFetchedAt = new Date();
+      
+      // Safety check: If this is an old feed missing a userId, warn and skip
+      if (!f.userId) {
+        console.warn(`[rss] Skipping feed ${f.feedUrl} - missing userId in database.`);
+        continue; 
+      }
+
+      // Save the feed updates
       await f.save();
 
       for (const it of items) {
@@ -71,14 +78,13 @@ async function fetchAllFeeds(opts = {}) {
         const pubDate = it.pubDate ? new Date(it.pubDate) : null;
         if (pubDate && pubDate < cutoff) continue;
         
-        // Ensure we check for existing links for THIS user
-        const existsQuery = userId ? { link: safeLink, userId } : { link: safeLink };
-        const exists = await Item.findOne(existsQuery).lean();
+        // Check for existing links for THIS specific user
+        const exists = await Item.findOne({ link: safeLink, userId: f.userId }).lean();
         if (exists) continue;
         
         await Item.create({
           ...it,
-          userId: userId, // FIX: Save the item to this specific user to satisfy Mongoose
+          userId: f.userId, // FIX: Always pull the userId directly from the parent Feed document
           link: safeLink,
           feedId: f._id,
           feedTitle: f.title || title,
