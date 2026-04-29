@@ -1,0 +1,16 @@
+[build]
+builder = "NIXPACKS"
+buildCommand = "cd backend && npm install"
+
+[deploy]
+startCommand = "cd backend && npm start"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
+healthcheckPath = "/api/tts/health"
+healthcheckTimeout = 30
+
+[env]
+# PORT is provided by Railway automatically (8080).
+# Set MONGO_URI, GEMINI_API_KEY, and KOKORO_URL in Railway's Variables tab.
+# KOKORO_URL must point at your deployed sidecar, e.g.
+#   https://newsreader-tts-production.up.railway.app

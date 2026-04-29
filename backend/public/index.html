@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#0a0a0a" />
+<title>Morninpod</title>
+<link rel="stylesheet" href="/styles.css" />
+<link rel="manifest" href="/manifest.json" />
+</head>
+<body>
+  <main id="app">
+    <section id="page-login" class="page active">
+      <header class="page-header">
+        <h1>Welcome</h1>
+      </header>
+      <div class="login-card">
+        <button id="btn-login-google" class="primary">Sign in with Google</button>
+        <p class="muted small">Your podcasts + saved stories are tied to your Google account.</p>
+      </div>
+    </section>
+
+    <!-- Pages -->
+    <section id="page-home" class="page">
+      <header class="page-header">
+        <img src="/morninpod.png" alt="MorninPod" class="app-logo" />
+        <h1>Today</h1>
+        <button id="build-btn" class="ghost">Build</button>
+      </header>
+      <div id="player" class="player hidden">
+        <div id="artwork" class="artwork">
+          <img id="artwork-img" alt="" />
+          <div id="artwork-yt" class="hidden"></div>
+        </div>
+        <div class="now-playing">
+          <div id="np-category" class="np-category"></div>
+          <div id="np-title" class="np-title">—</div>
+          <div id="np-feed" class="np-feed"></div>
+        </div>
+        <div class="scrub">
+          <span id="time-current" class="t">0:00</span>
+          <input id="scrub" type="range" min="0" max="1" step="0.01" value="0" />
+          <span id="time-total" class="t">0:00</span>
+        </div>
+        <div class="controls">
+          <button id="btn-back15" title="Back 15s">⏪ 15</button>
+          <button id="btn-prev" title="Previous">⏮</button>
+          <button id="btn-play" class="play" title="Play">▶</button>
+          <button id="btn-next" title="Next">⏭</button>
+          <button id="btn-fwd15" title="Forward 15s">15 ⏩</button>
+        </div>
+        <div class="row">
+          <a id="btn-article" class="ghost hidden" target="_blank" rel="noopener noreferrer" title="Read article">🔗</a>
+          <button id="btn-save" class="ghost">☆ Save</button>
+        </div>
+        <div id="status" class="status"></div>
+      </div>
+      <div id="empty-home" class="empty">
+        <p>No podcast yet for today.</p>
+        <p>Add a website on the Feeds tab, then tap <b>Build</b>.</p>
+      </div>
+    </section>
+
+    <section id="page-feeds" class="page">
+      <header class="page-header"><h1>Feeds</h1></header>
+      <form id="feed-form" class="feed-form">
+        <input id="feed-url" type="text" placeholder="Paste any website (e.g. theverge.com)" autocomplete="off" />
+        <button type="submit">Add</button>
+      </form>
+      <ul id="feed-list" class="feed-list"></ul>
+    </section>
+
+    <section id="page-saved" class="page">
+      <header class="page-header"><h1>Saved</h1></header>
+      <ul id="saved-list" class="saved-list"></ul>
+    </section>
+
+    <section id="page-settings" class="page">
+      <header class="page-header"><h1>Settings</h1></header>
+      <div class="settings-row">
+        <label for="voice-select">TTS voice</label>
+        <select id="voice-select"></select>
+      </div>
+      <div class="settings-row">
+        <button id="rebuild-btn">Rebuild today's podcast</button>
+      </div>
+      <div class="settings-row">
+        <button id="cleanup-btn" class="danger">Run cleanup now</button>
+      </div>
+      <div class="settings-row muted">
+        <small>Voice changes apply on next build. Existing TTS files won't be re-rendered automatically.</small>
+      </div>
+    </section>
+
+    <section id="page-stats" class="page">
+      <header class="page-header"><h1>Stats</h1></header>
+      <div id="stats-cards" class="stats-cards"></div>
+      <h2 class="subtle">Recent events</h2>
+      <ul id="event-list" class="event-list"></ul>
+    </section>
+  </main>
+
+  <nav id="tabs" class="tabs hidden">
+    <button data-tab="home" class="active">🎧<span>Today</span></button>
+    <button data-tab="feeds">📰<span>Feeds</span></button>
+    <button data-tab="saved">★<span>Saved</span></button>
+    <button data-tab="stats">📈<span>Stats</span></button>
+    <button data-tab="settings">⚙<span>Settings</span></button>
+  </nav>
+
+  <div id="user-bar" class="user-bar hidden">
+    <img id="user-avatar" alt="" />
+    <div class="user-meta">
+      <div id="user-name" class="user-name"></div>
+    </div>
+    <button id="btn-logout" class="ghost">Logout</button>
+  </div>
+
+  <audio id="audio" preload="auto"></audio>
+  <script src="/config.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
