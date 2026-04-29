@@ -45,8 +45,13 @@ function isBuildRunning() {
   return currentBuildAbort !== null;
 }
 
-async function fetchAllFeeds() {
-  const feeds = await Feed.find({});
+// FIX: Added opts so we can pass userId when fetching feeds
+async function fetchAllFeeds(opts = {}) {
+  const userId = opts.userId;
+  // Scope feeds to the user if a userId is provided
+  const query = userId ? { userId } : {}; 
+  const feeds = await Feed.find(query);
+  
   const today = todayDateStr();
   const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
   let totalNew = 0;
@@ -65,10 +70,15 @@ async function fetchAllFeeds() {
         if (!safeLink) continue;
         const pubDate = it.pubDate ? new Date(it.pubDate) : null;
         if (pubDate && pubDate < cutoff) continue;
-        const exists = await Item.findOne({ link: safeLink }).lean();
+        
+        // Ensure we check for existing links for THIS user
+        const existsQuery = userId ? { link: safeLink, userId } : { link: safeLink };
+        const exists = await Item.findOne(existsQuery).lean();
         if (exists) continue;
+        
         await Item.create({
           ...it,
+          userId: userId, // FIX: Save the item to this specific user to satisfy Mongoose
           link: safeLink,
           feedId: f._id,
           feedTitle: f.title || title,
@@ -98,18 +108,26 @@ async function setVoice(voice) {
   return voice;
 }
 
+// FIX: Added strict userId handling
 async function buildDailyPodcast(opts = {}) {
   const date = opts.date || todayDateStr();
   const voice = opts.voice || (await getVoice());
+  const userId = opts.userId;
+
+  // Safety net to catch missing user data
+  if (!userId) {
+    throw new Error('userId is required to build a podcast');
+  }
 
   // Register a new abort controller for this build
   const abort = new AbortController();
   currentBuildAbort = abort;
   const signal = abort.signal;
 
+  // FIX: Added userId to the query and update payload
   const podcast = await Podcast.findOneAndUpdate(
-    { podcastDate: date },
-    { podcastDate: date, voice, status: 'building', statusMessage: 'Gathering items…', timeline: [] },
+    { podcastDate: date, userId: userId },
+    { podcastDate: date, userId: userId, voice, status: 'building', statusMessage: 'Gathering items…', timeline: [] },
     { upsert: true, new: true }
   );
 
@@ -124,7 +142,10 @@ async function buildDailyPodcast(opts = {}) {
     checkAbort();
 
     const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    
+    // FIX: Scope item finding to this specific user
     const allItems = await Item.find({
+      userId: userId,
       podcastDate: date,
       pubDate: { $gte: cutoff },
     }).sort({ pubDate: -1 }).lean();
@@ -193,14 +214,11 @@ async function buildDailyPodcast(opts = {}) {
           itemDoc.link = `https://google.com/search?q=${encodeURIComponent(itemDoc.title || 'news')}`;
         }
 
-        // Scrape article first — only synthesise the "Next up" intro if there
-        // is actual content to follow it, so we never emit a dangling intro.
         checkAbort();
 
         console.log(`[scrape] fetching: ${itemDoc.link}`);
         const { text: articleText, sections, paywall, pubDate: scrapedDate, ogImage } = await fetchArticleText(itemDoc.link);
 
-        // If the RSS feed had no image, save the og:image scraped from the article page
         if (ogImage && !itemDoc.imageUrl) {
           await Item.findByIdAndUpdate(itemDoc._id, { imageUrl: ogImage });
           itemDoc.imageUrl = ogImage;
@@ -233,10 +251,8 @@ async function buildDailyPodcast(opts = {}) {
           console.log(`[scrape] no content, skipping: ${itemDoc.link}`);
         }
 
-        // Nothing to read — skip both intro and article to avoid a lone "Next up"
         if (ttsChunks.length === 0) continue;
 
-        // Now that we know there's content, generate and emit the story intro
         let storyIntroText;
         try {
           storyIntroText = await gemini.introForItem({
@@ -250,7 +266,6 @@ async function buildDailyPodcast(opts = {}) {
 
         checkAbort();
 
-        // storyId groups all chunks (intro + article) of one story together
         const storyId = String(itemDoc._id);
         const nonEmptyChunks = ttsChunks.filter(c => c.trim());
 
