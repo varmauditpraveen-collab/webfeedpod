@@ -101,6 +101,11 @@ async function setVoice(voice) {
 async function buildDailyPodcast(opts = {}) {
   const date = opts.date || todayDateStr();
   const voice = opts.voice || (await getVoice());
+  const userId = opts.userId;
+
+  if (!userId) {
+    throw new Error('buildDailyPodcast requires a userId in opts.');
+  }
 
   // Register a new abort controller for this build
   const abort = new AbortController();
@@ -108,8 +113,8 @@ async function buildDailyPodcast(opts = {}) {
   const signal = abort.signal;
 
   const podcast = await Podcast.findOneAndUpdate(
-    { podcastDate: date },
-    { podcastDate: date, voice, status: 'building', statusMessage: 'Gathering items…', timeline: [] },
+    { podcastDate: date, userId },
+    { podcastDate: date, userId, voice, status: 'building', statusMessage: 'Gathering items…', timeline: [] },
     { upsert: true, new: true }
   );
 
@@ -193,14 +198,11 @@ async function buildDailyPodcast(opts = {}) {
           itemDoc.link = `https://google.com/search?q=${encodeURIComponent(itemDoc.title || 'news')}`;
         }
 
-        // Scrape article first — only synthesise the "Next up" intro if there
-        // is actual content to follow it, so we never emit a dangling intro.
         checkAbort();
 
         console.log(`[scrape] fetching: ${itemDoc.link}`);
         const { text: articleText, sections, paywall, pubDate: scrapedDate, ogImage } = await fetchArticleText(itemDoc.link);
 
-        // If the RSS feed had no image, save the og:image scraped from the article page
         if (ogImage && !itemDoc.imageUrl) {
           await Item.findByIdAndUpdate(itemDoc._id, { imageUrl: ogImage });
           itemDoc.imageUrl = ogImage;
@@ -233,10 +235,8 @@ async function buildDailyPodcast(opts = {}) {
           console.log(`[scrape] no content, skipping: ${itemDoc.link}`);
         }
 
-        // Nothing to read — skip both intro and article to avoid a lone "Next up"
         if (ttsChunks.length === 0) continue;
 
-        // Now that we know there's content, generate and emit the story intro
         let storyIntroText;
         try {
           storyIntroText = await gemini.introForItem({
@@ -250,7 +250,6 @@ async function buildDailyPodcast(opts = {}) {
 
         checkAbort();
 
-        // storyId groups all chunks (intro + article) of one story together
         const storyId = String(itemDoc._id);
         const nonEmptyChunks = ttsChunks.filter(c => c.trim());
 
@@ -381,7 +380,6 @@ async function buildDailyPodcast(opts = {}) {
     emitSSE(date, 'error', { message: e.message });
     throw e;
   } finally {
-    // Clear the controller only if it's still ours
     if (currentBuildAbort === abort) {
       currentBuildAbort = null;
     }
