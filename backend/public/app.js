@@ -2,7 +2,6 @@ const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
 function showLogin() {
-  // Stop any stitched-story playback when switching back to login.
   try { stopSavedStoryPlayback(); } catch {}
   const a = $('#audio');
   if (a) {
@@ -36,7 +35,6 @@ function setAuthed(user) {
   state.currentUser = user || null;
   state.isAuthenticated = !!user?.id;
 
-  // Keep tab state consistent after auth bootstrap.
   $$('.tabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === 'home'));
   trackEvent('login_success', {}, { backend: false });
 }
@@ -57,7 +55,6 @@ async function apiRequest(method, p, body) {
     throw err;
   }
 
-  // Some endpoints might return empty bodies; tolerate that.
   return r.json().catch(() => ({}));
 }
 
@@ -70,9 +67,9 @@ const api = {
 
 const state = {
   podcast: null,
-  index: 0,           // raw timeline index (chunk level)
-  storyIndex: 0,      // story-level index (for Next / Prev)
-  stories: [],        // [{storyId, firstChunk, lastChunk, title, …}]
+  index: 0,
+  storyIndex: 0,
+  stories: [],
   positionInTrack: 0,
   isPlaying: false,
   lastSkippedFromStoryIndex: null,
@@ -80,14 +77,13 @@ const state = {
   voices: [],
   feeds: [],
   saved: [],
-  savedPlayer: null, // { audio, segments, index } for "stitched story" playback
+  savedPlayer: null,
   building: false,
   sseSource: null,
   currentUser: null,
   isAuthenticated: false,
 };
 
-// Optional GA4 bootstrap (set GA_MEASUREMENT_ID via /config.js from server.js)
 function initGoogleAnalytics() {
   try {
     const id = window.__APP_CONFIG__?.GA_MEASUREMENT_ID;
@@ -131,7 +127,7 @@ function rebuildStories() {
   for (let i = 0; i < t.length; i++) {
     const seg = t[i];
     const sid = seg.storyId;
-    if (!sid) continue; // feed-level intros have no storyId — skip
+    if (!sid) continue;
     if (!openStory || openStory.storyId !== sid) {
       openStory = { storyId: sid, firstChunk: i, lastChunk: i,
                     title: seg.title, imageUrl: seg.imageUrl,
@@ -199,7 +195,6 @@ $$('.tabs button').forEach((b) =>
   b.addEventListener('click', () => switchTab(b.dataset.tab))
 );
 
-// Auth UI
 $('#btn-login-google')?.addEventListener('click', () => {
   trackEvent('login_clicked', {}, { backend: false });
   window.location.href = '/auth/google';
@@ -306,7 +301,6 @@ function renderNowPlaying() {
     img.onerror = () => { img.removeAttribute('src'); };
   }
 
-  // Check state locally before wiping the button text
   const isSaved = meta.isSaved || e.isSaved;
   $('#btn-save').textContent = isSaved ? '★ Saved' : '☆ Save';
 
@@ -399,7 +393,7 @@ $('#btn-prev').addEventListener('click', () => {
   }
 
   state.lastSkippedFromIndex = state.index;
-  let targetIndex = 0; 
+  let targetIndex = 0;
   for (let i = currentStoryStart - 1; i >= 0; i--) {
     if (t[i].kind === 'story-intro' || t[i].kind === 'intro') {
       targetIndex = i;
@@ -442,21 +436,17 @@ $('#btn-fwd15').addEventListener('click', () => {
   trackEvent('player_forward_15_clicked', {});
 });
 
-// --- SIMPLE SAVE LOGIC (WITH UI STATE FIX) ---
 $('#btn-save').addEventListener('click', async () => {
   const t = state.podcast?.timeline || [];
   const e = t[state.index];
   if (!e || e.kind !== 'item' || !e.itemId) return;
 
-  // Make the API call to toggle the save state
   const res = await api.post('/api/items/' + e.itemId + '/save');
   const isSaved = res.item?.isSaved;
   trackEvent('save_toggled', { itemId: String(e.itemId), isSaved: !!isSaved });
-  
-  // Update the UI
+
   $('#btn-save').textContent = isSaved ? '★ Saved' : '☆ Save';
-  
-  // Store the new state locally so future re-renders remember it
+
   e.isSaved = isSaved;
   const si = storyIndexForChunk(state.index);
   if (si >= 0) {
@@ -503,6 +493,7 @@ function connectSSE(date) {
         loadTrack(state.podcast.timeline.length - 1, 0, true);
       } else {
         prefetchNext();
+        renderNowPlaying(); // ← keeps UI in sync as new segments stream in
       }
       updateScrub();
       const storyCount = state.stories.length;
@@ -789,7 +780,6 @@ function playSavedStory(it) {
     playCurrent();
   };
   audio.onerror = () => {
-    // If a segment fails, skip it so the rest of the stitched story still plays.
     idx += 1;
     if (idx >= segments.length) return stopSavedStoryPlayback();
     playCurrent();
@@ -827,13 +817,13 @@ $('#rebuild-btn').addEventListener('click', () => {
 });
 $('#cleanup-btn').addEventListener('click', async () => {
   if (!confirm('This will delete all cached items, audio files, podcast builds, and playback progress (saved items and feeds are kept). Continue?')) return;
-  
+
   const r = await api.post('/api/cleanup/run');
   trackEvent('cleanup_run', {
     deletedItems: r.deletedItems || 0,
     deletedFiles: r.deletedFiles || 0,
   });
-  
+
   const parts = [
     `${r.deletedItems || 0} items`,
     `${r.deletedFiles || 0} audio files`,
@@ -842,10 +832,9 @@ $('#cleanup-btn').addEventListener('click', async () => {
     `${r.deletedDomainCache || 0} domain cache entries`,
   ];
   const stopMsg = r.buildWasRunning ? '\n⚠️ An in-progress build was stopped.' : '';
-  
-  alert(`Cleanup complete:\n${parts.join('\n')}${stopMsg}`);
 
-  window.location.reload(); 
+  alert(`Cleanup complete:\n${parts.join('\n')}${stopMsg}`);
+  window.location.reload();
 });
 
 /* ---------- Utils ---------- */
