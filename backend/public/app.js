@@ -482,7 +482,9 @@ function connectSSE(date) {
   state.sseSource = src;
 
   src.onmessage = (ev) => {
-    ...
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+
     if (msg.event === 'segment') {
       const segment = msg.data;
       if (!state.podcast) {
@@ -501,7 +503,6 @@ function connectSSE(date) {
         loadTrack(state.podcast.timeline.length - 1, 0, true);
       } else {
         prefetchNext();
-        renderNowPlaying(); // ← ADD THIS
       }
       updateScrub();
       const storyCount = state.stories.length;
