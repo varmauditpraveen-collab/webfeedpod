@@ -1,4 +1,3 @@
-const fs = require('fs');
 const Feed = require('../models/Feed');
 const Item = require('../models/Item');
 const Podcast = require('../models/Podcast');
@@ -8,23 +7,30 @@ const gemini = require('./gemini');
 const tts = require('./tts');
 const { todayDateStr } = require('./db');
 
-// SSE emitter registry — keyed by date
+// SSE emitter registry — keyed by userId:date
 const sseClients = new Map();
 
-// Abort controller for the currently-running build (null when idle)
-let currentBuildAbort = null;
+// Abort controllers keyed by userId (one active build per user)
+const buildAborts = new Map();
 
-function registerSSEClient(date, res) {
-  if (!sseClients.has(date)) sseClients.set(date, new Set());
-  sseClients.get(date).add(res);
+function sseKey(userId, date) {
+  return `${userId}:${date}`;
 }
 
-function unregisterSSEClient(date, res) {
-  sseClients.get(date)?.delete(res);
+function registerSSEClient(userId, date, res) {
+  const key = sseKey(userId, date);
+  if (!sseClients.has(key)) sseClients.set(key, new Set());
+  sseClients.get(key).add(res);
 }
 
-function emitSSE(date, event, data) {
-  const clients = sseClients.get(date);
+function unregisterSSEClient(userId, date, res) {
+  const key = sseKey(userId, date);
+  sseClients.get(key)?.delete(res);
+}
+
+function emitSSE(userId, date, event, data) {
+  const key = sseKey(userId, date);
+  const clients = sseClients.get(key);
   if (!clients || clients.size === 0) return;
   const payload = `data: ${JSON.stringify({ event, data })}\n\n`;
   for (const res of clients) {
@@ -32,24 +38,28 @@ function emitSSE(date, event, data) {
   }
 }
 
-/** Abort any in-progress build. Returns true if a build was running. */
-function abortCurrentBuild() {
-  if (!currentBuildAbort) return false;
-  currentBuildAbort.abort();
-  currentBuildAbort = null;
+/** Abort any in-progress build for this user. Returns true if one was running. */
+function abortCurrentBuild(userId) {
+  const ctrl = buildAborts.get(String(userId));
+  if (!ctrl) return false;
+  ctrl.abort();
+  buildAborts.delete(String(userId));
   return true;
 }
 
-/** Whether a build is currently running */
-function isBuildRunning() {
-  return currentBuildAbort !== null;
+/** Whether a build is currently running for this user */
+function isBuildRunning(userId) {
+  return buildAborts.has(String(userId));
 }
 
-async function fetchAllFeeds() {
-  const feeds = await Feed.find({});
+async function fetchAllFeeds(userId) {
+  if (!userId) throw new Error('fetchAllFeeds requires a userId');
+
+  const feeds = await Feed.find({ userId });
   const today = todayDateStr();
   const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
   let totalNew = 0;
+
   for (const f of feeds) {
     try {
       const { title, items } = await fetchAndParseFeed(f.feedUrl);
@@ -65,7 +75,7 @@ async function fetchAllFeeds() {
         if (!safeLink) continue;
         const pubDate = it.pubDate ? new Date(it.pubDate) : null;
         if (pubDate && pubDate < cutoff) continue;
-        const exists = await Item.findOne({ link: safeLink }).lean();
+        const exists = await Item.findOne({ link: safeLink, userId }).lean();
         if (exists) continue;
         await Item.create({
           ...it,
@@ -73,6 +83,7 @@ async function fetchAllFeeds() {
           feedId: f._id,
           feedTitle: f.title || title,
           podcastDate: today,
+          userId,
         });
         totalNew++;
       }
@@ -84,15 +95,17 @@ async function fetchAllFeeds() {
   return { totalNew, today };
 }
 
-async function getVoice() {
-  const s = await Settings.findOne({ key: 'voice' }).lean();
+async function getVoice(userId) {
+  const key = userId ? `voice:${userId}` : 'voice';
+  const s = await Settings.findOne({ key }).lean();
   return s?.value || 'af_heart';
 }
 
-async function setVoice(voice) {
+async function setVoice(userId, voice) {
+  const key = userId ? `voice:${userId}` : 'voice';
   await Settings.findOneAndUpdate(
-    { key: 'voice' },
-    { key: 'voice', value: voice },
+    { key },
+    { key, value: voice },
     { upsert: true, new: true }
   );
   return voice;
@@ -100,16 +113,15 @@ async function setVoice(voice) {
 
 async function buildDailyPodcast(opts = {}) {
   const date = opts.date || todayDateStr();
-  const voice = opts.voice || (await getVoice());
   const userId = opts.userId;
 
-  if (!userId) {
-    throw new Error('buildDailyPodcast requires a userId in opts.');
-  }
+  if (!userId) throw new Error('buildDailyPodcast requires a userId in opts.');
 
-  // Register a new abort controller for this build
+  const voice = opts.voice || (await getVoice(userId));
+
+  // Register a new abort controller for this user's build
   const abort = new AbortController();
-  currentBuildAbort = abort;
+  buildAborts.set(String(userId), abort);
   const signal = abort.signal;
 
   const podcast = await Podcast.findOneAndUpdate(
@@ -118,7 +130,6 @@ async function buildDailyPodcast(opts = {}) {
     { upsert: true, new: true }
   );
 
-  /** Throw if cleanup/abort was requested mid-build */
   function checkAbort() {
     if (signal.aborted) {
       throw Object.assign(new Error('Build cancelled by cleanup.'), { code: 'ABORTED' });
@@ -131,6 +142,7 @@ async function buildDailyPodcast(opts = {}) {
     const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
     const allItems = await Item.find({
       podcastDate: date,
+      userId,
       pubDate: { $gte: cutoff },
     }).sort({ pubDate: -1 }).lean();
 
@@ -141,7 +153,7 @@ async function buildDailyPodcast(opts = {}) {
       podcast.statusMessage = 'No items for today.';
       podcast.builtAt = new Date();
       await podcast.save();
-      emitSSE(date, 'done', { totalDurationSeconds: 0 });
+      emitSSE(userId, date, 'done', { totalDurationSeconds: 0 });
       return podcast;
     }
 
@@ -184,7 +196,7 @@ async function buildDailyPodcast(opts = {}) {
         podcast.timeline = [...timeline];
         podcast.totalDurationSeconds = cursor;
         await podcast.save();
-        emitSSE(date, 'segment', entry);
+        emitSSE(userId, date, 'segment', entry);
       } catch (e) {
         if (e.code === 'ABORTED') throw e;
         console.warn(`[tts] feed intro failed (${feedTitle}): ${e.message}`);
@@ -280,7 +292,7 @@ async function buildDailyPodcast(opts = {}) {
           podcast.timeline = [...timeline];
           podcast.totalDurationSeconds = cursor;
           await podcast.save();
-          emitSSE(date, 'segment', entry);
+          emitSSE(userId, date, 'segment', entry);
         } catch (e) {
           if (e.code === 'ABORTED') throw e;
           console.warn(`[tts] story intro failed "${itemDoc.title}": ${e.message}`);
@@ -328,7 +340,7 @@ async function buildDailyPodcast(opts = {}) {
               podcast.timeline = [...timeline];
               podcast.totalDurationSeconds = cursor;
               await podcast.save();
-              emitSSE(date, 'segment', chunkEntry);
+              emitSSE(userId, date, 'segment', chunkEntry);
             }
 
             itemDoc.ttsAudioPath = firstAudioPath;
@@ -360,7 +372,7 @@ async function buildDailyPodcast(opts = {}) {
     podcast.statusMessage = '';
     podcast.builtAt = new Date();
     await podcast.save();
-    emitSSE(date, 'done', { totalDurationSeconds: cursor });
+    emitSSE(userId, date, 'done', { totalDurationSeconds: cursor });
     return podcast;
   } catch (e) {
     if (e.code === 'ABORTED') {
@@ -369,7 +381,7 @@ async function buildDailyPodcast(opts = {}) {
         podcast.status = 'error';
         podcast.statusMessage = 'Cancelled by cleanup.';
         await podcast.save();
-        emitSSE(date, 'error', { message: 'Cancelled by cleanup.' });
+        emitSSE(userId, date, 'error', { message: 'Cancelled by cleanup.' });
       } catch {}
       return;
     }
@@ -377,11 +389,11 @@ async function buildDailyPodcast(opts = {}) {
     podcast.status = 'error';
     podcast.statusMessage = e.message;
     await podcast.save();
-    emitSSE(date, 'error', { message: e.message });
+    emitSSE(userId, date, 'error', { message: e.message });
     throw e;
   } finally {
-    if (currentBuildAbort === abort) {
-      currentBuildAbort = null;
+    if (buildAborts.get(String(userId)) === abort) {
+      buildAborts.delete(String(userId));
     }
   }
 }
